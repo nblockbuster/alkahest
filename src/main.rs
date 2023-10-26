@@ -39,6 +39,7 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
 };
 
+use crate::activity::{Unk8080925b, Unk80809994};
 use crate::camera::FpsCamera;
 use crate::config::{WindowConfig, CONFIGURATION};
 use crate::dxbc::{get_input_signature, get_output_signature, DxbcHeader, DxbcInputType};
@@ -76,6 +77,7 @@ use crate::text::{decode_text, StringData, StringPart, StringSetHeader};
 use crate::types::AABB;
 use render::vertex_layout::InputElement;
 
+mod activity;
 mod camera;
 mod config;
 mod dds;
@@ -672,6 +674,106 @@ pub fn main() -> anyhow::Result<()> {
         .collect();
 
     let mut entity_renderers: IntMap<TagHash, EntityRenderer> = Default::default();
+
+    // for now just hardcoding one of the hashes for sabotage/spire of stars
+    // possible entity that has a model: 239afa80
+
+    let th = TagHash(u32::from_be(
+        u32::from_str_radix("0c60fb80", 16)
+            .context("Invalid activity hash format")
+            .unwrap(),
+    ));
+
+    let act: Unk80809994 = package_manager().read_tag_struct(th)?;
+    // info!("act.unk30 = {:?}", act.unk30);
+
+    // 80809994 -> unk50 (8080924d) -> unk8 (8080924f) ->
+    // unk44 (8080925b) ->
+    // unk14 (8080925e) -> unk28? or unk8 (80809260) ->
+    // (80809462) -> unk38 (80809464) -> unk8 (80809466) ->
+    // (80809468) -> unk10 (80809b13) ->
+    // (80809b14) -> unkc or unk10? (80809c36)
+
+    for unk_a in act.unk50.iter().last().unwrap().unk8.iter() {
+        for act_ent in unk_a
+            .unk44
+            .unk14
+            .unk28
+            .iter()
+            .flat_map(|x| x.unk0.unk38.iter())
+            .flat_map(|a| a.unk8.iter())
+            .flat_map(|b| b.unk10.iter())
+        {
+            // for unk38 in act_a.unk0.unk38.iter() {
+            //     for eref in unk38.unk8.iter() {
+            //         for act_ent in eref.unk0.unk10.iter() {
+            let e = &act_ent.unkc;
+            let te = e.tag();
+
+            match e.unk10.resource_type {
+                0x808072b8 => {
+                    info!(
+                        "\t- EntityModel {:08x}/{}",
+                        e.unk18.resource_type.to_be(),
+                        e.unk10.resource_type.to_be(),
+                    );
+                    let mut cur = Cursor::new(package_manager().read_tag(e.tag())?);
+                    cur.seek(SeekFrom::Start(e.unk18.offset + 0x1dc))?;
+                    let model: Tag<Unk808073a5> = cur.read_le()?;
+                    cur.seek(SeekFrom::Start(e.unk18.offset + 0x300))?;
+                    let entity_material_map: TablePointer<Unk808072c5> = cur.read_le()?;
+                    let materials: TablePointer<Tag<Unk808071e8>> = cur.read_le()?;
+
+                    for m in &materials {
+                        material_map.insert(
+                            m.tag(),
+                            Material::load(&renderer, m.0.clone(), m.tag(), true),
+                        );
+                    }
+
+                    for m in &model.meshes {
+                        for p in &m.parts {
+                            if p.material.is_valid() {
+                                material_map.insert(
+                                    p.material,
+                                    Material::load(
+                                        &renderer,
+                                        package_manager().read_tag_struct(p.material)?,
+                                        p.material,
+                                        true,
+                                    ),
+                                );
+                            }
+                        }
+                    }
+
+                    if let Ok(er) = EntityRenderer::load(
+                        model.0,
+                        entity_material_map.to_vec(),
+                        materials.iter().map(|m| m.tag()).collect_vec(),
+                        &renderer,
+                        &dcs,
+                    ) {
+                        if entity_renderers.insert(te, er).is_some() {
+                            error!("More than 1 model was loaded for entity {te}");
+                        }
+                    }
+
+                    // println!(" - EntityModel {model:?}");
+                }
+                u => debug!(
+                    "\t- Unknown entity resource type {:08X}/{:08X} (table {})",
+                    u.to_be(),
+                    e.unk10.resource_type.to_be(),
+                    e.tag()
+                ),
+            }
+            // if !entity_renderers.contains_key(&te) {
+            //     warn!("Entity {te} does not contain any geometry!");
+            // }
+        }
+    }
+
     for te in &to_load_entities {
         let _span = debug_span!("Load entity", hash = %te).entered();
         let header: Unk80809c0f = package_manager().read_tag_struct(*te)?;
